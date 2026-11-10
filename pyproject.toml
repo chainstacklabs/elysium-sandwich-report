@@ -1,0 +1,8 @@
+[project]
+name = "elysium-sandwich-report"
+version = "0.1.0"
+description = "Sandwich attacks on Elysium mainnet: detection, victims' losses and bots' profits"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []
