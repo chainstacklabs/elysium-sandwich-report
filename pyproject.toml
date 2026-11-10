@@ -1,0 +1,16 @@
+[project]
+name = "elysium-sandwich-report"
+version = "0.1.0"
+description = "Sandwich attacks on Elysium mainnet: detection, victims' losses and bots' profits"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+allowed-confusables = ["–"]  # en dashes in the report's ranges are typography
