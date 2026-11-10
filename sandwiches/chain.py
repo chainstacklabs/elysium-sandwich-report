@@ -22,6 +22,7 @@ WETH_DEPOSIT = "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc910
 WETH_WITHDRAWAL = "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65"
 
 APPS = {  # names for the contracts victims called; unknown ones stay unnamed
+    "0x9b601cc44bb8405da290d70bdcad3a3767bd3333": "Unnamed trading-bot router",
     "0x1b341fdd55d56f8e08409a2c25ddfad93eb03c1a": "Uniswap Universal Router 2.2.0",
     "0xa13f7611115752deb2b13813bdde16a5073e4b45": "Uniswap Universal Router 2.1.2",
     "0xca11bde05977b3631167028862be2a173976ca11": "Multicall3",
