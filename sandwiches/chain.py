@@ -11,6 +11,7 @@ WHYPE = "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
 USDC = "0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65"  # 6 decimals; many fake "USDC" tokens exist
 STRESS_TEST = (87_023, 142_652)  # 2026-10-31 team stress test: dust transfers from 1,000 wallets, no trading
 PUBLIC_LAUNCH = 1794229200  # 2026-11-09 13:00 UTC
+CUTOFF = 1794355200  # 2026-11-11 00:00 UTC: data ends at the last block before this
 
 V4_SWAP = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
 V3_SWAP = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"

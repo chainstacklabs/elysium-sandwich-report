@@ -30,10 +30,12 @@ all before the public launch. This repository measures who did it and what the v
 
 ## Run
 
-Needs Python 3.12+, [uv](https://docs.astral.sh/uv/) and an Elysium mainnet archive endpoint with `debug_*` methods.
+Needs Python 3.12+, [uv](https://docs.astral.sh/uv/), an Elysium mainnet archive endpoint with `debug_*` methods and
+a HyperEVM endpoint with full log history.
 
 ```bash
 export ELYSIUM_RPC_URL=https://...
+export HYPEREVM_RPC_URL=https://...
 uv run python -m sandwiches
 ```
 

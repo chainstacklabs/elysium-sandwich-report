@@ -1,8 +1,8 @@
-"""Inline SVG charts. Colors come from CSS variables so the page follows light and dark mode."""
+"""Inline SVG charts. Colors come from CSS variables defined in report.css."""
 
 from html import escape
 
-W = 960  # viewBox width; the SVG scales to the page
+W = 948  # viewBox width: the page's content width (980 - 2 x 16), so one unit is one pixel on a desktop
 
 
 def _open(w, h, label):
@@ -15,15 +15,6 @@ def nice_top(value, steps=4):
     mag = 10 ** (len(str(int(raw))) - 1) if raw >= 1 else 1
     step = next(m * mag for m in (1, 2, 2.5, 5, 10) if raw <= m * mag)
     return step * steps, step
-
-
-def _column(x, top, w, h, r=3):
-    """A column rounded at the top and square at the baseline."""
-    r = min(r, w / 2, h)
-    return (
-        f"M{x:.1f} {top + h:.1f}V{top + r:.1f}Q{x:.1f} {top:.1f} {x + r:.1f} {top:.1f}"
-        f"H{x + w - r:.1f}Q{x + w:.1f} {top:.1f} {x + w:.1f} {top + r:.1f}V{top + h:.1f}Z"
-    )
 
 
 def _bar(x, y, w, h, r=3):
@@ -39,7 +30,7 @@ def _grid(x0, x1, y, top, step, fmt):
     out, v = [], 0
     while v <= top + 1e-9:
         out.append(
-            f'<line x1="{x0}" x2="{x1}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="{"base" if v == 0 else "grid"}"/>'
+            f'<line x1="{x0}" x2="{x1}" y1="{y(v) + 0.5}" y2="{y(v) + 0.5}" class="{"base" if v == 0 else "grid"}"/>'
             f'<text x="{x0 - 8}" y="{y(v) + 4:.1f}" text-anchor="end" class="tick">{fmt(v)}</text>'
         )
         v += step
@@ -65,79 +56,71 @@ def _place(events, x_of, right):
     return out, len(rows)
 
 
-def stacked_bars(
-    columns,
-    series,
-    label,
-    *,
-    total=None,
-    axis=None,
-    band=None,
-    events=(),
-    height=260,
-    centered=True,
-    tip=str,
-    tip_key=None,
-):
-    """Stacked columns. columns: [(key, axis label)]; series: [(name, color, {key: value})].
-    total formats a label on top of each column (no grid); axis formats grid ticks instead;
-    tip formats hover values and tip_key names a column in them.
-    band: (first key of the second period, label before, label from); events: [(column position, text, css class)]."""
+def _frame(columns, series, *, axis, band, events, height, label):
+    """Layout shared by the stacked charts: margins, scale, band, grid and event marks (behind the data)."""
     ml, mr, mb = (56 if axis else 8), 12, 26
     keys = [k for k, _ in columns]
     totals = [sum(s[2].get(k, 0) for s in series) for k in keys]
-    top, step = nice_top(max(totals) * (1.1 if total else 1.0))
+    top, step = nice_top(max(totals))
     bw = (W - ml - mr) / len(columns)
-    cw = min(bw * 0.72, 44)
     placed, n_rows = _place(events, lambda p: ml + p * bw, W - mr)
     band_top = 6 + 17 * n_rows
-    mt = band_top + (24 if band else 0) + (16 if total else 0)
-    y = lambda v: mt + height * (1 - v / top)  # noqa: E731
+    mt = band_top + (8 if band else 0)
+    y = lambda v: round(mt + height * (1 - v / top))  # noqa: E731  whole units: edges fall on pixels
     out = [_open(W, mt + height + mb, label)]
     if band:
         i = keys.index(band[0])
         out.append(
-            f'<rect x="{ml}" y="{band_top}" width="{i * bw:.1f}" height="{mt + height - band_top}" class="band"/>'
-            f'<text x="{ml + 8}" y="{band_top + 16}" class="bandl">{escape(band[1])}</text>'
-            f'<text x="{ml + i * bw + 8}" y="{band_top + 16}" class="bandl">{escape(band[2])}</text>'
+            f'<rect x="{ml}" y="{band_top}" width="{round(i * bw)}" height="{mt + height - band_top}" class="band"/>'
         )
     if axis:
         out.append(_grid(ml, W - mr, y, top, step, axis))
-    for i, (key, text) in enumerate(columns):
-        x = ml + i * bw + ((bw - cw) / 2 if centered else 0)
-        stack = [(name, color, values.get(key, 0)) for name, color, values in series if values.get(key, 0) > 0]
-        # Each segment runs from its top down to the baseline and lower ones paint over it, so neighbours
-        # share an edge with no seam. Drawn top segment first.
-        tops = []
-        acc = 0
-        for _, _, v in stack:
-            acc += v
-            tops.append(acc)
-        for j in range(len(stack) - 1, -1, -1):
-            name, color, v = stack[j]
-            t = y(tops[j])
-            hover = f"<title>{escape(tip_key(key) if tip_key else text or key)}, {escape(name)}: {tip(v)}</title>"
-            if j == len(stack) - 1:
-                out.append(f'<path d="{_column(x, t, cw, y(0) - t)}" style="fill:{color}">{hover}</path>')
-            else:
-                box = f'x="{x:.1f}" y="{t:.1f}" width="{cw:.1f}" height="{y(0) - t:.1f}"'
-                out.append(f'<rect {box} style="fill:{color}">{hover}</rect>')
-        if total and acc > 0:
-            out.append(
-                f'<text x="{x + cw / 2:.1f}" y="{y(acc) - 6:.1f}" text-anchor="middle" class="val">{total(acc)}</text>'
-            )
-        if text:
-            anchor = f'x="{x + cw / 2:.1f}" text-anchor="middle"' if centered else f'x="{x:.1f}"'
-            out.append(f'<text {anchor} y="{mt + height + 18}" class="tick">{escape(text)}</text>')
-    if not axis:
-        out.append(f'<line x1="{ml}" x2="{W - mr}" y1="{y(0):.1f}" y2="{y(0):.1f}" class="base"/>')
     for x, tx, anchor, row, text, cls in placed:
         ty = 14 + 17 * row
+        lx = round(x) + 0.5
         out.append(
-            f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{ty - 10}" y2="{y(0):.1f}" class="ev {cls}"/>'
+            f'<line x1="{lx}" x2="{lx}" y1="{ty - 10}" y2="{y(0)}" class="ev {cls}"/>'
             f'<text x="{tx:.1f}" y="{ty}" text-anchor="{anchor}" class="evl">{escape(text)}</text>'
         )
+    return out, keys, totals, ml, mr, mt, bw, y
+
+
+def stacked_area(columns, series, label, *, axis, band=None, events=(), height=260, tip=str, tip_key=None):
+    """Stacked areas for many time points (hours), first series at the bottom on the shared baseline.
+    Points sit at the middle of each column and are joined by straight lines. Each band is filled from its top boundary
+    down to the baseline and the bands below paint over it, so neighbouring colors meet with no seam or gap. A transparent strip per column carries the hover text with every value."""
+    out, keys, totals, ml, mr, mt, bw, y = _frame(
+        columns, series, axis=axis, band=band, events=events, height=height, label=label
+    )
+    fy = lambda v: mt + height * (1 - v / _top(totals))  # noqa: E731  unrounded: lines stay smooth
+    xs = [ml + (i + 0.5) * bw for i in range(len(keys))]
+    cum, acc = [[0.0] * len(keys)], [0.0] * len(keys)
+    for _, _, values in series:
+        acc = [a + values.get(k, 0) for a, k in zip(acc, keys, strict=True)]
+        cum.append(acc)
+
+    def line(vals):
+        return " ".join(f"{x:.1f},{fy(v):.1f}" for x, v in zip(xs, vals, strict=True))
+
+    base = f"{xs[-1]:.1f},{fy(0):.1f} {xs[0]:.1f},{fy(0):.1f}"
+    for j in range(len(series) - 1, -1, -1):  # top band first; each lower band paints over it
+        out.append(f'<polygon points="{line(cum[j + 1])} {base}" style="fill:{series[j][1]}"/>')
+    out.append(f'<line x1="{ml}" x2="{W - mr}" y1="{y(0) + 0.5}" y2="{y(0) + 0.5}" class="base"/>')
+    for i, (key, text) in enumerate(columns):
+        x0 = ml + i * bw
+        if totals[i] > 0:
+            lines = "; ".join(f"{name}: {tip(values.get(key, 0))}" for name, _, values in series if values.get(key, 0))
+            out.append(
+                f'<rect x="{x0:.1f}" y="{mt}" width="{bw:.1f}" height="{height}" class="hit">'
+                f"<title>{escape(tip_key(key) if tip_key else text or key)}: {escape(lines)}</title></rect>"
+            )
+        if text:
+            out.append(f'<text x="{x0:.1f}" y="{mt + height + 18}" class="tick">{escape(text)}</text>')
     return "".join(out) + "</svg>"
+
+
+def _top(totals):
+    return nice_top(max(totals))[0]
 
 
 def bars(items, fmt, label, label_width=150, row=28):

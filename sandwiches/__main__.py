@@ -5,7 +5,7 @@ Each step reads and writes ./cache, so a re-run only fetches what is new.
 
 import sys
 
-from . import clock, detect, money, operators, report, scan, venues
+from . import clock, detect, inbox, money, operators, report, rules, scan, venues
 from .chain import load, save
 
 
@@ -20,6 +20,8 @@ def measure():
     tokens, prices_, clk = load("pool_tokens.json"), load("prices.json"), clock.Clock()
     ops = operators.run(found, legs, prices_, clk)
     money.profit(found, legs, ops, prices_, clk)
+    inbox.prove([s for s in found if s["tier"] == "C"])  # an inbox victim's block holds no sequencer transactions
+    money.count(found)
     money.simulate([s for s in found if s["counted"]], tokens, prices_, clk)
     for s in found:
         s.setdefault("loss", None)
@@ -32,6 +34,7 @@ STEPS = {
     "detect": detect.run,  # pool tokens, candidates, transaction checks, tiers
     "prices": prices,  # daily HYPE/USD from Elysium's USDC pools
     "measure": measure,  # profit from traces, operators, victims' loss from simulation
+    "rules": rules.run,  # how the count changes with the sell window
     "venues": venues.run,  # swap events of other AMM formats
     "report": report.build,  # docs/index.html and data/sandwiches.csv
 }

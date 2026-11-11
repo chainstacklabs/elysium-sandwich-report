@@ -1,9 +1,11 @@
 """What each sandwich moved: the bot's profit from traces, the victim's loss from simulation."""
 
+import math
 from collections import defaultdict
 
 from . import rpc
 from .chain import TRANSFER, USDC, WETH_DEPOSIT, WETH_WITHDRAWAL, WHYPE, is_hype, load, parse_swap, save
+from .detect import MAX_BETWEEN
 
 
 def flows(trace):
@@ -68,7 +70,7 @@ def in_hype(x, usd_per_hype):
 def profit(sandwiches, legs, operators, prices, clock):
     """Profit = what the operator's addresses gained over both legs, in HYPE, minus both legs' gas.
     Its addresses: the wallet, its bot, the contract both legs called (its bot, or an app holding its funds),
-    and its profit recipients. Next-block cases (tier C) count only for operators that profit from them overall."""
+    and its profit recipients."""
     members = operators["members"]
     recipients = set(operators["recipients"])
     for s in sandwiches:
@@ -86,32 +88,83 @@ def profit(sandwiches, legs, operators, prices, clock):
             total += sum(in_hype(x, price) for a, x in leg["flows"].items() if a in side)
             total -= leg["gas"] if leg["from"] in side else 0
         s["operator"], s["profit"] = op, total
-    by_op = defaultdict(lambda: [0, 0])
+
+
+PROVEN_PER_OPERATOR = 10  # proven sandwiches an operator needs before its matches count
+CHANCE = 0.005  # how often a proof fires on ordinary buys in the same pools
+ODDS = 1e-5  # an operator's proven count must be this unlikely by chance (about 20 operators are tested)
+MAX_WALLETS = 20  # more wallets than this is a crowd of app users, not one bot
+
+
+def by_chance(k, n, q=CHANCE):
+    """Probability of k or more proven matches out of n if each is proven by chance with probability q."""
+    if k <= 0:
+        return 1.0
+    log_q, log_r = math.log(q), math.log1p(-q)
+    terms = [
+        math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * log_q + (n - i) * log_r
+        for i in range(k, n + 1)
+    ]
+    top = max(terms)
+    return math.exp(top) * sum(math.exp(x - top) for x in terms)
+
+
+def count(sandwiches):
+    """A match counts when its operator is proven. Proofs that the bot knew the victim's transaction: the victim's buy
+    waited in the HyperEVM inbox before the bot bought (`inbox`), the bot's buy was ordered just ahead of the victim by
+    tip in the same block (`order`), the victim got just above its minimum (`limit`). Proofs also fire by chance on
+    about CHANCE of ordinary buys, so one proven match is not enough. An operator is proven by PROVEN_PER_OPERATOR or
+    more proven matches that chance would give with odds below ODDS, at most MAX_WALLETS wallets, and a profit over all
+    its matches; then all its matches count."""
+    matches, proven, wallets, kept = defaultdict(int), defaultdict(int), defaultdict(set), defaultdict(int)
     for s in sandwiches:
-        if s["tier"] == "C":
-            by_op[s["operator"]][0] += 1
-            by_op[s["operator"]][1] += s["profit"] or 0
+        s["proofs"] = [
+            p
+            for p, ok in (
+                ("inbox", (s.get("inbox") or {}).get("proven")),
+                ("order", s["tip_signature"]),
+                ("limit", s.get("limit")),
+            )
+            if ok
+        ]
+        op = s["operator"]
+        matches[op] += 1
+        proven[op] += bool(s["proofs"])
+        wallets[op].add(s["wallet"])
+        kept[op] += s["profit"] or 0
+    ops = {
+        op
+        for op in matches
+        if proven[op] >= PROVEN_PER_OPERATOR
+        and by_chance(proven[op], matches[op]) < ODDS
+        and len(wallets[op]) <= MAX_WALLETS
+        and kept[op] > 0
+    }
     for s in sandwiches:
-        n, total = by_op[s["operator"]]
-        s["counted"] = s["tier"] != "C" or (n >= 20 and total > 0)
+        s["counted"] = s["operator"] in ops
+        s["evidence"] = "+".join(s["proofs"]) or ("operator" if s["counted"] else None)
 
 
 def simulate(sandwiches, tokens, prices, clock):
-    """Re-run each sandwich's victim transactions, in order, on the state just before the bot's buy, and compare
-    with what the victims really got. The loss is the extra HYPE paid, or HYPE not received, for the same trade."""
+    """Re-run, in order and without the bot's buy, every transaction that swapped in the pool from the buy to the last
+    victim, on the state just before the buy's block, and compare the victims' results with what they really got.
+    The loss is the extra HYPE paid, or HYPE not received, for the same trade."""
     full = load("victim_txs.json", {})
-    need = sorted({v["tx"] for s in sandwiches for v in s["victims"]} - set(full))
+    need = sorted({h for s in sandwiches for h in s["between"][:MAX_BETWEEN]} - set(full))
     for i in range(0, len(need), 1000):
         chunk = need[i : i + 1000]
         for h, t in zip(chunk, rpc.batch([("eth_getTransactionByHash", [h]) for h in chunk]), strict=True):
             if isinstance(t, dict) and "from" in t:
                 full[h] = {"from": t["from"], "to": t["to"], "input": t["input"], "value": t["value"], "gas": t["gas"]}
+        if i % 20000 == 0:
+            print(f"replay tx lookups {i + len(chunk):,}/{len(need):,}", flush=True)
     save("victim_txs.json", full)
-    cache = load("simulations.json", {})
+    cache = load("simulations_v2.json", {})
+    key = lambda s: s["front"]["tx"] + s["back"]["tx"]  # noqa: E731
     todo = [
         s
         for s in sandwiches
-        if s["front"]["tx"] + s["back"]["tx"] not in cache and all(v["tx"] in full for v in s["victims"])
+        if key(s) not in cache and len(s["between"]) <= MAX_BETWEEN and all(h in full for h in s["between"])
     ]
     for i in range(0, len(todo), 10):
         chunk = todo[i : i + 10]
@@ -120,7 +173,7 @@ def simulate(sandwiches, tokens, prices, clock):
                 (
                     "eth_simulateV1",
                     [
-                        {"blockStateCalls": [{"calls": [full[v["tx"]] for v in s["victims"]]}], "validation": False},
+                        {"blockStateCalls": [{"calls": [full[h] for h in s["between"]]}], "validation": False},
                         hex(s["front"]["b"] - 1),
                     ],
                 )
@@ -129,16 +182,19 @@ def simulate(sandwiches, tokens, prices, clock):
         )
         for s, r in zip(chunk, res, strict=True):
             calls = r[0]["calls"] if isinstance(r, list) else []
-            cache[s["front"]["tx"] + s["back"]["tx"]] = [
-                _swap_in(c.get("logs", []), s["pool"], s["front"]["venue"]) if c.get("status") == "0x1" else None
-                for c in calls
-            ]
+            at = {h: i for i, h in enumerate(s["between"])}
+            out = []
+            for v in s["victims"]:
+                c = calls[at[v["tx"]]] if len(calls) == len(s["between"]) else {}
+                ok = c.get("status") == "0x1"
+                out.append(_swap_in(c.get("logs", []), s["pool"], s["front"]["venue"]) if ok else None)
+            cache[key(s)] = out
         if i % 2000 == 0:
-            save("simulations.json", cache)
+            save("simulations_v2.json", cache)
             print(f"simulated {i + len(chunk):,}/{len(todo):,}", flush=True)
-    save("simulations.json", cache)
+    save("simulations_v2.json", cache)
     for s in sandwiches:
-        s["loss"] = _loss(s, cache.get(s["front"]["tx"] + s["back"]["tx"]), tokens, prices[clock.day(s["front"]["b"])])
+        s["loss"] = _loss(s, cache.get(key(s)), tokens, prices[clock.day(s["front"]["b"])])
 
 
 def _swap_in(logs, pool, venue):

@@ -15,6 +15,7 @@ from . import rpc
 from .chain import (
     BIN_SWAP,
     CACHE,
+    CUTOFF,
     LB_SWAP,
     STRESS_TEST,
     TRANSFER,
@@ -26,6 +27,7 @@ from .chain import (
     save,
     write_rows,
 )
+from .clock import _first_blocks
 
 LOGS = os.path.join(CACHE, "logs")
 
@@ -112,7 +114,9 @@ def transfer_rows(start, end):
 
 
 def run():
-    head = rpc.head()
+    tip = rpc.head()
+    first_after = _first_blocks({"cutoff": CUTOFF}, tip).get("cutoff")
+    head = first_after - 1 if first_after else tip
     for start, end, complete in chunks(head):
         path = os.path.join(LOGS, f"{start:09d}.jsonl.gz")
         if complete and os.path.exists(path):

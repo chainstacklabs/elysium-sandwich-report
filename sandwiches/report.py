@@ -10,20 +10,22 @@ from html import escape
 
 from . import rpc
 from .chain import APPS, NATIVE, PUBLIC_LAUNCH, USDC, WHYPE, load, save
-from .charts import bars, stacked_bars
+from .charts import bars, stacked_area
 from .clock import Clock
+from .detect import WINDOW
+from .money import CHANCE, MAX_WALLETS, ODDS, PROVEN_PER_OPERATOR
 
 EXPLORER = "https://elysium.kinetiq.xyz/"
 EXAMPLES = [  # bot buys of the walkthroughs: one in the private mainnet, one after the public launch
     ("Private mainnet", "0xd1933d28ca7c8d1760a3365b5a1389f8125ec390e4d41994b295e4798e056292"),
-    ("Public mainnet", "0x5c0a851514b886faaaf4266d465a34d2bd3de34c35653a38c15afb4801081948"),
+    ("Public mainnet", "0x613d9e38a89bbce0b88f716c77899809244a5295593050ca47256ea4f8837005"),
 ]
 NAMED = 5  # operators shown by letter and color
 COLORS = ["var(--o1)", "var(--o2)", "var(--o3)", "var(--o4)", "var(--o5)"]
 OTHER = "var(--o0)"
 LOSS_BUCKETS = [(i, i + 1) for i in range(10)] + [(10, None)]  # equal 1-point bins, then the tail
 VENUE = {"v4": "Uniswap V4", "v2v3": "Uniswap V2/V3", "bin": "Bin AMM", "lb": "Liquidity Book"}
-LATER = "1\u2060–\u20602\u00a0blocks"  # "1–2 blocks" that never breaks across lines
+HYPEREVM_EXPLORER = "https://hyperevmscan.io/"
 VENUE_SHORT = {"v4": "V4", "v2v3": "V2/V3", "bin": "Bin AMM", "lb": "LB"}
 
 
@@ -58,6 +60,11 @@ def n(v):
 
 def pct(v):
     return f"{v:.1f}%" if v < 10 else f"{v:.0f}%"
+
+
+def approx(x):
+    """Round a rate for prose: 144 -> 140, 21 -> 20, 4.3 -> 4."""
+    return int(round(x, -1)) if x >= 15 else round(x)
 
 
 def whole_pct(v):
@@ -216,6 +223,7 @@ def build():
     profit_hype = sum(s["profit"] or 0 for s in rows) / 1e18
     volume = sum(s["volume_usd"] for s in rows)
     victims = {d.txs[v["tx"]]["from"] for s in rows for v in s["victims"]}
+    victim_trades = sum(len(s["victims"]) for s in rows)
     loss_pcts = [100 * s["loss"] / s["victim_hype"] for s in measured]
     median_pct = statistics.median(loss_pcts)
     after = [s for s in rows if s["t"] >= PUBLIC_LAUNCH]
@@ -280,21 +288,23 @@ def build():
     low_cap = -(-max(by_hour.get(k, 0) for k in before[low:]) // 100) * 100 if low is not None else None
 
     # ---- header and key
-    pre_share = pct(100 * (len(rows) - len(after)) / len(rows))
+    hours_before = (PUBLIC_LAUNCH - first) / 3600
+    hours_after = (d.head["ts"] - PUBLIC_LAUNCH) / 3600
+    rate_before = (len(rows) - len(after)) / hours_before
+    rate_after = len(after) / hours_after
     header = f"""
 <header>
 <h1>Sandwich attacks on Elysium</h1>
 <p class="standfirst">Elysium opened as a private mainnet with early-access trading and went public on
-{at(PUBLIC_LAUNCH)}. Since the private launch, bots have sandwiched more than {n(len(rows) // 1000 * 1000)} trades.
-{pre_share} of them came before the public launch; since then, sandwiching has almost stopped.</p>
+{at(PUBLIC_LAUNCH)}. Bots have run more than {n(len(rows) // 1000 * 1000)} sandwiches since the private launch.
+After the public launch, the rate fell from about {approx(rate_before)} sandwiches an hour to about {approx(rate_after)}.</p>
 <dl class="key">
 <div><dt>Data</dt><dd>Every Elysium mainnet block up to {block(d.head["block"], "block")}
-({at(d.head["ts"])})</dd></div>
-<div><dt>Times</dt><dd>UTC</dd></div>
-<div><dt>Dollars</dt><dd>HYPE converted at each day's median price in Elysium's HYPE/USDC pools.
+({at(d.head["ts"])}). Times are UTC</dd></div>
+<div><dt>USD values</dt><dd>HYPE amounts converted at each day's median price in Elysium's HYPE/USDC pools.
 K is thousand, M is million</dd></div>
-<div><dt>Sandwich</dt><dd>A bot buys just before a victim's buy and sells right after it, so the victim pays
-a higher price</dd></div>
+<div><dt>Sandwich</dt><dd>A bot buys just before a victim's buy and sells soon after it, at most {WINDOW} seconds
+after its own buy, so the victim pays a higher price. Counts depend on this rule (<a href="#rules">how</a>)</dd></div>
 <div><dt>Operator</dt><dd>One attacker: the wallets that send its transactions and the bot contracts they call.
 <a href="#who">The five that caused the most loss</a> are labeled Operator A to E</dd></div>
 <div><dt>Victims lost</dt><dd>What the victim's trade would have returned without the bot's buy, minus what it
@@ -302,8 +312,6 @@ returned. For {unmeasured_pct} of sandwiches it can't be measured, and they coun
 (<a href="#unmeasured">why</a>)</dd></div>
 <div><dt>Bots kept</dt><dd>The operator's net gain in HYPE, WHYPE and USDC over its two transactions,
 after gas</dd></div>
-<div><dt>Same block</dt><dd>The bot's buy, the victim's trade and the bot's sell are in one block. Otherwise
-the bot sold {LATER} later</dd></div>
 </dl>
 </header>"""
 
@@ -319,9 +327,13 @@ the bot sold {LATER} later</dd></div>
 
     tiles = "\n".join(
         [
-            tile("Victims lost", usd(loss), f"{hype(loss_hype)} HYPE<br>median {pct(median_pct)} of a trade"),
+            tile("Victims lost", usd(loss), f"{hype(loss_hype)} HYPE<br>median sandwich: {pct(median_pct)} of the trade"),
             tile("Bots kept, after gas", usd(profit), f"{hype(profit_hype)} HYPE<br>{kept_pct} of the loss"),
-            tile("Trades sandwiched", usd(volume), f"{n(len(rows))} trades<br>by {n(len(victims))} wallets"),
+            tile(
+                "Value of sandwiched trades",
+                usd(volume),
+                f"{n(victim_trades)} trades by {n(len(victims))} wallets<br>in {n(len(rows))} sandwiches",
+            ),
             tile(
                 "After public launch",
                 usd(after_loss),
@@ -334,23 +346,33 @@ the bot sold {LATER} later</dd></div>
     more_than_three = ", more than the next three operators together" if beats_three else ""
     until = when(a_same, "%b %-d") if a_same else "the launch"
     timeline = [
-        event(first, f"First sandwich. Until {until}, bots mostly sell {LATER} after the victim."),
-        event(op[A]["first"], f"{opref(A)} starts and soon becomes the largest attacker."),
-        event(hour_start(peak_hour), f"Losses peak: {usd(peak_value)} in one hour."),
+        (first, f"First sandwich. Until {until}, bots mostly sell a block or more after the victim."),
+        (op[A]["first"], f"{opref(A)} starts and soon becomes the largest attacker."),
+        (hour_start(peak_hour), f"Losses peak: {usd(peak_value)} in one hour."),
     ]
     if a_same:
-        timeline.append(event(a_same, f"{opref(A)} starts putting its buy, the victim and its sell in one block."))
+        timeline.append((a_same, f"{opref(A)} starts putting its buy, the victim and its sell in one block."))
     if low is not None:
-        timeline.append(event(hour_start(before[low]), f"Losses fall under {usd(low_cap)} an hour and stay there."))
-    timeline.append(event(PUBLIC_LAUNCH, f"Public launch. {opref(A)} stops at {when(op[A]['last'], '%H:%M')}."))
-    timeline = "\n".join(timeline)
+        timeline.append((hour_start(before[low]), f"Losses fall under {usd(low_cap)} an hour and stay there."))
+    timeline.append((PUBLIC_LAUNCH, f"Public launch. {opref(A)} stops at {when(op[A]['last'], '%H:%M')}."))
+    route_day = defaultdict(lambda: [0.0, 0.0])  # [inbox, sequencer] losses per day
+    for s in rows:
+        route_day[s["day"]][s["victims"][0].get("path") != "inbox"] += s["loss_usd"]
+    days_seen = sorted(route_day)
+    switch = next((x for i, x in enumerate(days_seen) if all(route_day[y][1] > route_day[y][0] for y in days_seen[i:])), None)
+    if switch and switch != days_seen[0]:
+        start = min(s["t"] for s in rows if s["day"] == switch and s["victims"][0].get("path") != "inbox")
+        timeline.append(
+            (start, "Most losses now come from buys sent to the sequencer, no longer through the inbox on HyperEVM.")
+        )
+    timeline = "\n".join(event(t, text) for t, text in sorted(timeline, key=lambda e: e[0]))
     summary = f"""
 <section class="summary">
 <div class="tiles">
 {tiles}
 </div>
-<p class="lead">Three <a href="#who">operators</a> caused {top3} of the losses. Users of one trading-bot router,
-{addr(top_app[0])}, took {app_share}. The timeline follows {opref(A)}: it alone caused {a_share}
+<p class="lead">{", ".join(opref(o) for o in ops[:2])} and {opref(ops[2])} caused {top3} of the losses. Victims who traded through one trading-bot router, {addr(top_app[0])}, lost {app_share} of the
+total. The timeline follows {opref(A)}: it alone caused {a_share}
 of the losses{more_than_three}.</p>
 <ol class="events">
 {timeline}
@@ -392,10 +414,129 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
 
     by_front = {s["front"]["tx"]: s for s in rows}
     figs = "\n".join(example_fig(label, by_front[h]) for label, h in EXAMPLES if by_front.get(h, {}).get("loss"))
+
+    # ---- how bots saw the trades
+    hdr = load("headers.json")
+    tiers_n = Counter(s["tier"] for s in rows)
+    tip_ok = sum(1 for s in rows if s["tier"] == "A" and s["tip_signature"])
+    same_n = tiers_n["A"] + tiers_n["B"]
+    paired = sum(1 for s in rows if s["tier"] != "C" and s["signed_together"])
+    paired_text = "In every same-block sandwich" if paired == same_n else f"In {pct(100 * paired / same_n)} of same-block sandwiches"
+    by_path = {"inbox": [], "sequencer": []}
+    for s in rows:
+        by_path[s["victims"][0].get("path", "sequencer")].append(s)
+    route_rows = []
+    for key, label in (("sequencer", "Sent to the sequencer"), ("inbox", "Sent through the inbox on HyperEVM")):
+        rs = by_path[key]
+        if rs:
+            lost = sum(s["loss_usd"] for s in rs)
+            route_rows.append(
+                [
+                    label,
+                    n(len(rs)),
+                    dollars(lost),
+                    bar(lost, loss),
+                    stamp(min(s["t"] for s in rs)),
+                    stamp(max(s["t"] for s in rs)),
+                ]
+            )
+    seq_share = pct(100 * len(by_path["sequencer"]) / len(rows))
+    route_fig = figure(
+        f"In {seq_share} of sandwiches, the victim's buy was sent to the sequencer",
+        "Sandwiches by how the victim's buy reached Elysium: sent to the sequencer through an RPC, or sent through the "
+        "inbox on HyperEVM (below).",
+        table(
+            [
+                ("Victim's buy", "l"),
+                ("Sandwiches", "r"),
+                ("Victims lost ($)", "r"),
+                ("", "bar"),
+                ("First", "l"),
+                ("Last", "l"),
+            ],
+            route_rows,
+        ),
+    )
+
+    proven = [s for s in by_path["inbox"] if (s.get("inbox") or {}).get("proven")]
+    inbox_unknown = sum(1 for s in d.all if (s.get("inbox") or {}).get("unknown"))
+    inbox_unknown_text = f" {n(inbox_unknown)} matches could not be checked." if inbox_unknown else ""
+    inbox_fig = ""
+    if proven:
+        leads = [s["inbox"]["lead"] for s in proven]
+        ex = max((s for s in proven if s["loss"]), key=lambda s: s["loss_usd"], default=proven[0])
+        front_ts = hdr[str(ex["front"]["b"])][0]
+        msg = ex["inbox"]["message"]
+        msg_link = (
+            f'<a class="addr" href="{HYPEREVM_EXPLORER}tx/{msg}" target="_blank" rel="noopener" title="{msg}">'
+            f"{short(msg)}</a>"
+        )
+        v = ex["victims"][0]
+        lost_text = (
+            f": it gets {pct(100 * ex['loss'] / ex['victim_hype'])} fewer tokens, "
+            f"a loss of {hype(ex['loss'] / 1e18)} HYPE"
+            if ex["loss"]
+            else ""
+        )
+        kept_text = f", keeping {hype(ex['profit'] / 1e18)} HYPE" if ex["profit"] is not None else ""
+        msg_time = when(front_ts - ex["inbox"]["lead"], "%H:%M:%S")
+        sell = tx(ex["back"]["tx"], short(ex["back"]["tx"]))
+        steps = f"""<ol class="steps">
+<li><p><b>1. Victim sends its buy</b> through the inbox on HyperEVM at {msg_time}.
+Anyone can read it there.</p>{msg_link}</li>
+<li><p><b>2. Bot buys on Elysium</b> {ex["inbox"]["lead"]} s later, through the sequencer, with
+{hype(ex["front_hype"] / 1e18)} HYPE.</p>{tx(ex["front"]["tx"], short(ex["front"]["tx"]))}</li>
+<li><p><b>3. Elysium executes the victim's buy</b> {ex["buy_to_victim_blocks"]} blocks later, at the raised
+price{lost_text}.</p>{tx(v["tx"], short(v["tx"]))}</li>
+<li><p><b>4. Bot sells</b> {ex["seconds"]} s after its buy{kept_text}.</p>{sell}</li>
+</ol>"""
+        inbox_fig = '<div id="inbox-example">' + figure(
+            "Through the inbox: the bot bought as soon as the victim's buy appeared on HyperEVM",
+            "This is how the chain works: Elysium is an Arbitrum Nitro chain, and instead of sending a transaction to "
+            "the sequencer, anyone can send it through the inbox on HyperEVM, Elysium's parent chain. The sequencer "
+            "executes it seconds later; until then the trade is public on HyperEVM. "
+            f"In {pct(100 * len(proven) / len(by_path['inbox']))} of sandwiches with a victim's buy sent this way, the "
+            "bot bought after the victim's message appeared on HyperEVM (or in the same second), a median of "
+            f"{statistics.median(leads):g} s later.{inbox_unknown_text} "
+            f"Example from {at(front_ts)}, {d.pool_label(ex['pool'])}:",
+            steps,
+        ) + "</div>"
+
     example = f"""
 <section id="example"><h2>What does a sandwich look like?</h2>
-<p class="dek">In both, the bot saw the victim's buy before it reached a block.</p>
+<p class="dek">Both victims sent their buy to the sequencer, and in both the bot saw it before it reached a block.
+In {pct(100 * len(by_path["inbox"]) / len(rows))} of sandwiches the victim sent its buy through the inbox on HyperEVM
+instead (<a href="#inbox-example">example</a>).</p>
 {figs}
+</section>"""
+
+    seq = by_path["sequencer"]
+    early = sum(1 for s in seq if s["buy_to_victim_blocks"] >= 1)
+    early_pct = pct(100 * early / len(seq)) if seq else "0%"
+    limit_pct = pct(100 * sum(1 for s in seq if "limit" in s.get("proofs", [])) / len(seq)) if seq else "0%"
+    seq_fig = figure(
+        "Sent to the sequencer: bots knew the victim's exact transaction",
+        "These trades were never public before they were in a block, yet bots acted on them:",
+        f"""<ul class="facts">
+<li><b>Victim pushed to its minimum.</b> In {limit_pct} of these sandwiches the victim received just above the
+minimum output written in its own transaction, against about {CHANCE:.1%} of ordinary buys. The bot sized its buy to
+that limit, which it could only read from the victim's transaction.</li>
+<li><b>Tips.</b> When the bot's buy, the victim's trade and the bot's sell are back to back in one block, the bot's buy
+paid a higher tip than the victim in {pct(100 * tip_ok / tiers_n["A"])} of cases, usually exactly 1 wei more, and its
+sell paid no more than the victim.</li>
+<li><b>Signed in advance.</b> {paired_text}, the bot sent its sell together with its buy (consecutive nonces): it
+planned the whole sandwich before the victim's trade was in a block.</li>
+<li><b>Ahead of the block.</b> In {early_pct} of these sandwiches, the bot's buy landed in an earlier block than the
+victim's buy, so the bot acted before the victim's trade was in any block.</li>
+</ul>""",
+    )
+    seen = f"""
+<section id="seen"><h2>How did bots see the trades?</h2>
+<p class="dek">Elysium has no public mempool, yet bots saw victims' buys before they reached a block, in two
+ways.</p>
+{route_fig}
+{inbox_fig}
+{seq_fig}
 </section>"""
 
     # ---- when
@@ -405,37 +546,16 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
     for s in rows:
         per_op[s["operator"] if s["operator"] in name else "rest"][s["day"]] += s["loss_usd"]
     series = [(name[o], color[o], per_op[o]) for o in ops[:NAMED]] + [("Others", OTHER, per_op["rest"])]
-    launch_day = when(PUBLIC_LAUNCH, "%Y-%m-%d")
-    daily = stacked_bars(
-        [(x, day(x)) for x in days],
-        series,
-        "Victims' losses per day, by operator",
-        total=usd,
-        tip=usd,
-        band=(launch_day, "Private mainnet", "Public mainnet") if launch_day in days else None,
-    )
-    a_leads = next((x for x in days if per_op[A][x] and per_op[A][x] == max(v[2].get(x, 0) for v in series)), days[0])
-    traded_peak = d.volume.get(peak, 0)
-    peak_sandwiched = sum(s["victim_hype"] for s in rows if s["day"] == peak) / 1e18
-    share_peak = 100 * peak_sandwiched / traded_peak if traded_peak else 0
-    daily_fig = figure(
-        f"Operators took turns, then {opref(A)} caused most losses from {day(a_leads)}",
-        f"Victims' losses per day, by operator. On the worst day, {day(peak)}, sandwiched trades were "
-        f"{pct(share_peak)} of all HYPE traded on Elysium.",
-        daily,
-        legend([(nm, c) for nm, c, _ in series]),
-    )
-
     hours = [h for h in clock.names if h[:10] >= days[0]]
-    tiers = {"same": defaultdict(float), "next": defaultdict(float)}
+    per_op_hour = {o: defaultdict(float) for o in per_op}
     for s in rows:
-        tiers["same" if s["tier"] != "C" else "next"][clock.hour(s["front"]["b"])] += s["loss_usd"]
+        per_op_hour[s["operator"] if s["operator"] in name else "rest"][clock.hour(s["front"]["b"])] += s["loss_usd"]
     events = [
         (first, "First sandwich", "mev"),
         (op[A]["first"], "Operator A starts", "mev"),
-        *([(a_same, "A goes same-block", "mev")] if a_same else []),
+        *([(a_same, "Operator A: same block", "mev")] if a_same else []),
         (PUBLIC_LAUNCH, "Public launch", "chain"),
-        (op[A]["last"], "A stops", "mev"),
+        (op[A]["last"], "Operator A stops", "mev"),
     ]
     hour_index = {h: i for i, h in enumerate(hours)}
     marks = [
@@ -443,13 +563,47 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
         for t, text, k in events
         if when(t, "%Y-%m-%dT%H") in hour_index
     ]
-    hourly = stacked_bars(
+    launch_hour = when(PUBLIC_LAUNCH, "%Y-%m-%dT%H")
+    band = (launch_hour,) if launch_hour in hours else None
+    shaded = " The shaded part is the private mainnet." if band else ""
+    daily = stacked_area(
         [(h, day(h[:10]) if h.endswith("T00") else "") for h in hours],
-        [("Same block", "var(--same)", tiers["same"]), (f"{LATER} later", "var(--next)", tiers["next"])],
-        f"Victims' losses per hour, same block and {LATER} later",
+        [(name[o], color[o], per_op_hour[o]) for o in ops[:NAMED]] + [("Others", OTHER, per_op_hour["rest"])],
+        "Victims' losses per hour, by operator",
         axis=usd_axis,
+        band=band,
         events=marks,
-        centered=False,
+        tip=usd,
+        tip_key=lambda h: f"{day(h[:10])}, {h[11:]}:00",
+    )
+    a_leads = next((x for x in days if per_op[A][x] and per_op[A][x] == max(v[2].get(x, 0) for v in series)), days[0])
+    traded_peak = d.volume.get(peak, 0)
+    peak_sandwiched = sum(s["victim_hype"] for s in rows if s["day"] == peak) / 1e18
+    share_peak = 100 * peak_sandwiched / traded_peak if traded_peak else 0
+    daily_fig = figure(
+        f"Operators took turns, then {opref(A)} caused most losses from {day(a_leads)}",
+        f"Victims' losses per hour, by operator.{shaded}",
+        daily,
+        legend([(nm, c) for nm, c, _ in series]),
+    )
+
+    tiers = {"same": defaultdict(float), "next": defaultdict(float), "inbox": defaultdict(float)}
+    for s in rows:
+        path = "same" if s["tier"] != "C" else ("inbox" if s["victims"][0].get("path") == "inbox" else "next")
+        tiers[path][clock.hour(s["front"]["b"])] += s["loss_usd"]
+    inbox_share = pct(100 * sum(tiers["inbox"].values()) / loss)
+    hourly_series = [  # the inbox share is the point, so it sits on the baseline
+        ("Victim sent through the inbox on HyperEVM", "var(--inbox)", tiers["inbox"]),
+        ("Victim sent to the sequencer, bot sold in a later block", "var(--next)", tiers["next"]),
+        ("Victim sent to the sequencer, same block", "var(--same)", tiers["same"]),
+    ]
+    hourly = stacked_area(
+        [(h, day(h[:10]) if h.endswith("T00") else "") for h in hours],
+        hourly_series,
+        "Victims' losses per hour: same block, later block, and through the inbox",
+        axis=usd_axis,
+        band=band,
+        events=marks,
         tip=usd,
         tip_key=lambda h: f"{day(h[:10])}, {h[11:]}:00",
     )
@@ -460,10 +614,11 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
         hourly_title = "Victims' losses per hour"
     hourly_fig = figure(
         hourly_title,
-        f"Victims' losses per hour. At the peak, {usd(peak_value)} at {when(hour_start(peak_hour), '%H:00')}, "
-        f"{opref(A)} was still selling {LATER} after the victim.",
+        f"Victims' losses per hour, by how the victim's buy reached Elysium.{shaded} Victims who sent their buy through the "
+        f"inbox on HyperEVM lost {inbox_share} of the total. On the worst day, {day(peak)}, sandwiched trades were "
+        f"{pct(share_peak)} of all HYPE traded on Elysium.",
         hourly,
-        legend([("Same block", "var(--same)"), (f"Bot sold {LATER} later", "var(--next)")]),
+        legend([(label, c) for label, c, _ in hourly_series]),
     )
 
     per_day = defaultdict(lambda: [0, 0.0, 0.0, 0.0])
@@ -478,7 +633,7 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
             ("Day", "l"),
             ("HYPE price ($)", "r"),
             ("Sandwiches", "r"),
-            ("Traded ($)", "r"),
+            ("Sandwiched trades ($)", "r"),
             ("Victims lost ($)", "r"),
             ("Bots kept ($)", "r"),
         ],
@@ -532,12 +687,22 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
         ],
         "ops",
     )
+    after_ops = Counter(s["operator"] for s in after)
+    after_ops_text = (
+        f'<p class="dek">After the public launch, {n(len(after_ops))} operators were still active. Their shares of '
+        "the sandwiches since then: "
+        + ", ".join(
+            f"{opref(o) if o in name else addr(o)} {pct(100 * k / len(after))}" for o, k in after_ops.most_common()
+        )
+        + ".</p>"
+        if after_ops
+        else ""
+    )
     ops_fig = figure(
         f"Operator A caused {a_share} of all losses",
         f"All {n(len(ops))} operators, by victims' loss. <i>Same block</i> is the share of an operator's sandwiches "
-        f"with its buy, the victim's trade and its sell in one block; in the rest it sold {LATER} later. "
-        f"Bots kept {kept_pct} of what victims lost, because each sandwich pays pool and launchpad fees on two trades.",
-        ops_table,
+        "with its buy, the victim's trade and its sell in one block; in the rest it sold in a later block.",
+        ops_table + after_ops_text,
     )
 
     members, recipients = d.ops["members"], set(d.ops["recipients"])
@@ -585,7 +750,7 @@ tokens, a loss of {hype(loss_h)} HYPE.</p>{tx(victim, short(victim))}</li>
     who_section = f"""
 <section id="who"><h2>Who did it?</h2>
 {ops_fig}
-<figure><h3>Addresses of the five largest operators</h3>
+<figure><h3>Addresses of the five operators that caused the most loss</h3>
 <p class="dek"><i>Wallets</i> are the accounts that sign and send an operator's transactions; one operator can run
 several, for example to send many transactions at once. <i>Bot contracts</i> are the contracts those transactions call
 to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim's trade and the bot's sell.</p>
@@ -598,10 +763,10 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
         for lo, hi in LOSS_BUCKETS
     ]
     loss_fig = figure(
-        f"The median victim lost {pct(median_pct)} of the trade",
-        f"Sandwiched trades, by the share of the trade's value the victim lost. "
-        f"{n(sum(1 for p in loss_pcts if p >= 10))} trades lost 10% or more.",
-        bars(bucket_rows, n, "Sandwiched trades by share of the trade lost", 110, 24),
+        f"In the median sandwich, the victim lost {pct(median_pct)} of the trade",
+        "Sandwiches, by the share of the trade's value the victims lost. In "
+        f"{pct(100 * sum(1 for p in loss_pcts if p >= 10) / len(loss_pcts))} of sandwiches they lost 10% or more.",
+        bars(bucket_rows, n, "Sandwiches by share of the trade lost", 110, 24),
     )
     app_rows = [
         [
@@ -628,9 +793,9 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
             ]
         )
     apps_fig = figure(
-        f"Users of one trading-bot router took {app_share} of the losses",
-        "Victims' losses by the contract their transaction called. Users of Uniswap's router and other unrelated apps "
-        "were hit too, so the leak was on a path these apps share, not inside one app.",
+        f"Victims who traded through one trading-bot router lost {app_share} of the total",
+        "Victims' losses by the contract their transaction called. Users of Uniswap's router and of other apps not "
+        "linked to the bots were hit too.",
         table(
             [("Contract", "l"), ("Name", "l"), ("Trades", "r"), ("Wallets", "r"), ("Lost ($)", "r"), ("", "bar")],
             app_rows,
@@ -644,16 +809,31 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
             w[1] += 1
             w[2] += s["volume_usd"] / len(s["victims"])
     largest = sorted(vict.items(), key=lambda kv: -kv[1][0])[:10]
+    wallet_op = {s["wallet"]: s["operator"] for s in rows}
+
+    def victim_label(w):
+        o = wallet_op.get(w)
+        if o is None:
+            return addr(w)
+        owner = f"{name[o]}'s" if o in name else "a bot"
+        return f'{addr(w)} <span class="more">{owner} wallet</span>'
+
+    bot_victims = [w for w, _ in largest if w in wallet_op]
+    victims_note = (
+        '<p class="dek">Bots were sandwiched too: a wallet marked with an operator also ran sandwiches of its own.</p>'
+        if bot_victims
+        else ""
+    )
     victims_table = table(
-        [("Wallet", "l"), ("Trades", "r"), ("Traded ($)", "r"), ("Lost ($)", "r")],
-        [[addr(w), n(v[1]), dollars(v[2]), dollars(v[0])] for w, v in largest],
+        [("Wallet", "l"), ("Trades", "r"), ("Sandwiched trades ($)", "r"), ("Lost ($)", "r")],
+        [[victim_label(w), n(v[1]), dollars(v[2]), dollars(v[0])] for w, v in largest],
     )
     victims_section = f"""
 <section id="victims"><h2>Who got hurt, and how badly?</h2>
 {loss_fig}
 {apps_fig}
-<details><summary>Ten largest victims</summary>
-{victims_table}
+<details><summary>Ten victims who lost the most</summary>
+{victims_table}{victims_note}
 </details></section>"""
 
     # ---- where
@@ -674,7 +854,7 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
         ("Pool", "l"),
         ("Venue", "l"),
         ("Sandwiches", "r"),
-        ("Traded ($)", "r"),
+        ("Sandwiched trades ($)", "r"),
         ("Lost ($)", "r"),
         ("", "bar"),
         ("Main operator", "l"),
@@ -703,7 +883,7 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
     pool_note = f" {name.get(first_op, short(first_op))} was the main attacker in all ten." if one_op else ""
     top10_share = pct(100 * sum(v["loss"] for _, v in top10) / loss)
     pools_fig = figure(
-        "Most targets were new tokens paired with HYPE on Uniswap V4",
+        "Most targets were tokens paired with HYPE on Uniswap V4",
         f"The ten pools with the largest losses. {n(len(pools))} pools were hit; these ten took {top10_share} "
         f"of all losses.{pool_note}",
         table(pool_head, pool_rows),
@@ -714,7 +894,6 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
 </section>"""
 
     # ---- method
-    tiers_n = Counter(s["tier"] for s in d.all)
     by_venue = Counter(d.venue(s) for s in rows)
 
     def venue_row(label, events_key, venue, note=""):
@@ -749,33 +928,90 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
             venue_row("Algebra, PancakeSwap V3, Curve, Balancer", "Algebra, PancakeSwap V3, Curve, Balancer", None),
         ],
     )
-    tip_ok = sum(1 for s in d.all if s["tier"] == "A" and s["tip_signature"])
-    same_n = tiers_n["A"] + tiers_n["B"]
-    paired = sum(1 for s in d.all if s["tier"] != "C" and s["signed_together"])
-    paired_text = f"In all {n(same_n)}" if paired == same_n else f"In {n(paired)} of {n(same_n)}"
-    later_counted = n(sum(1 for s in rows if s["tier"] == "C"))
+    by_proof = Counter(p for s in d.all for p in s.get("proofs", []))
+    proven_n = sum(1 for s in d.all if s.get("proofs"))
+    chance = [s for s in d.all if s.get("proofs") and not s["counted"]]
+    pattern_n = sum(1 for s in rows if not s.get("proofs"))
+    rules_table = table(
+        [
+            ("Rule", "l"),
+            ("Matches", "r"),
+            ("Matching wallets", "r"),
+            ("Proven", "r"),
+            ("Counted", "r"),
+            ("Operators", "r"),
+            ("Counted after launch", "r"),
+        ],
+        [
+            [
+                r["rule"],
+                n(r["matches"]),
+                n(r["wallets"]),
+                n(r["proven"]),
+                n(r["counted"]),
+                n(r["counted_operators"]),
+                n(r["after_launch"]),
+            ]
+            for r in load("rules.json", [])
+        ],
+    )
+    check = load("handcheck.json", None)
+    check_text = (
+        f" In a random sample of {n(check['checked'])} sandwiches counted without a proof of their own, the victim "
+        f"lost in {'every one' if check['victim_lost'] == check['checked'] else pct(100 * check['victim_lost'] / check['checked'])} and the bot also profited in "
+        f"{pct(100 * check['bot_profited'] / check['checked'])}."
+        if check
+        else ""
+    )
     method = f"""
 <section id="method"><h2>How do we know?</h2>
 <div class="method">
 <div><h3>Venues</h3><p>All swap events of the common AMM formats, from block 1.</p>{venue_table}</div>
 <div><h3>Finding sandwiches</h3><ol>
 <li>In one pool: a buy, then other wallets buying in the same direction, then a sell by the first buyer of about what
-it bought (within 5%), all within 2 blocks.</li>
+it bought (within 5%), with the sell's block at most {WINDOW} seconds after the buy's block. We call this pattern a
+<i>match</i>. Each buy and each sell joins one match at most.</li>
 <li>The buy and the sell come from the same wallet, each victim from a different one.</li>
-<li>Same block: {n(same_n)} sandwiches, all counted. Sold {LATER} later: {n(tiers_n["C"])} candidates;
-{later_counted} counted, from operators that profit from this pattern overall.</li></ol></div>
-<div><h3>Evidence that bots saw pending transactions</h3>
-<p>Elysium has no public mempool. Yet in {n(tip_ok)} of {n(tiers_n["A"])} sandwiches with the three transactions next
-to each other, the bot's buy pays a higher tip than the victim and its sell no more than the victim; usually the buy
-pays the victim's tip plus 1 wei. {paired_text} same-block sandwiches, the bot signed its sell together with its buy
-(consecutive nonces). Operator A's contract refuses to sell unless it gets back more than it paid, which only works if
-it knows a buy will land in between.</p></div>
+<li>A buy, then others buying, then a sell is also what an ordinary trader does. What makes it a sandwich is that the
+bot knew the victim's transaction before it landed. {pct(100 * proven_n / len(d.all))} of matches carry their own proof
+of that (a match can carry more than one):<ul>
+<li><b>Minimum hit:</b> {pct(100 * by_proof["limit"] / len(d.all))} of matches. The victim received just above an amount written in its own
+transaction (by at most 0.01%): its minimum output, which the bot's buy was sized to reach. Ordinary buys in the same
+pools show this about {CHANCE:.1%} of the time. An output exactly equal to such an amount is an exact-output trade and does
+not count.</li>
+<li><b>Ordered by tip:</b> {pct(100 * by_proof["order"] / len(d.all))}. In one block, the bot's buy pays a higher tip than the victim and
+its sell no more than the victim.</li>
+<li><b>Inbox:</b> {pct(100 * by_proof["inbox"] / len(d.all))}. The victim's buy was waiting in the inbox on HyperEVM before the bot
+bought.</li></ul></li>
+<li>Proofs also fire by chance, on about {CHANCE:.1%} of ordinary buys, so one proven match proves nothing. A match
+counts when its operator is proven, which takes all four:<ul>
+<li>{PROVEN_PER_OPERATOR} or more proven matches;</li>
+<li>more proven matches than chance would give, with odds below 1 in {round(1 / ODDS):,};</li>
+<li>at most {MAX_WALLETS} wallets, since a larger group is app users rather than one bot;</li>
+<li>a profit over all its matches.</li></ul>
+Then all of its matches count; {pct(100 * pattern_n / len(rows))} of counted sandwiches have no proof
+of their own. The remaining proven matches, {pct(100 * len(chance) / len(d.all))} of all matches and spread over
+{n(len({s["operator"] for s in chance}))} operators, do not count.{check_text}
+</li></ol>
+<p>The first version of this report (Nov 10) required the sell within 2 blocks. Blocks came 1 to 9 a second, so that
+meant 0.2 to 2 seconds and missed bots that sold later.</p></div>
+<div id="rules"><h3>How the count changes with the rule</h3>
+<p>Each row keeps only the matches where the bot sold within that time, and counts them the same way. Longer windows
+find many more matches, mostly ordinary traders who bought and sold while others were buying; the proof keeps them out
+of the count.</p>
+{rules_table}</div>
+<div><h3>Detecting the inbox route</h3>
+<p>A victim's buy came through the inbox on HyperEVM when the block that executed it read a new message from the
+inbox (the block header counts messages read). The message's time comes from its <code>MessageDelivered</code>
+log on Elysium's bridge contract on HyperEVM.</p></div>
 <div><h3>Losses and profits</h3><ul>
-<li><b>Victims lost:</b> the victim's transaction is re-run with <code>eth_simulateV1</code> on the state just before
-the bot's buy and compared with what it really received.</li>
-<li id="unmeasured"><b>Not measured:</b> {n(len(unmeasured))} sandwiches ({unmeasured_pct}).
-{n(len(no_price))} are in pools of two tokens with neither HYPE nor USDC, so their loss has no price; for the other
-{n(len(unmeasured) - len(no_price))} the re-run failed or its result could not be valued. They count as zero, so the
+<li><b>Victims lost:</b> every transaction that swapped in the pool from the bot's buy to the last victim is re-run
+in order, without the bot's buy, with <code>eth_simulateV1</code> on the state just before the buy's block. Each
+victim's result is compared with what it really received.</li>
+<li id="unmeasured"><b>Not measured:</b> {unmeasured_pct} of sandwiches.
+{pct(100 * len(no_price) / len(rows))} are in pools of two tokens with neither HYPE nor USDC, so their loss has no
+price; for the other {pct(100 * (len(unmeasured) - len(no_price)) / len(rows))} the re-run failed, had more than 40 transactions to replay, or its result could
+not be valued. They count as zero, so the
 totals are a floor.</li>
 <li><b>Bots kept:</b> both bot transactions are traced with <code>debug_traceTransaction</code>, summing every HYPE,
 WHYPE and USDC movement in and out of the operator's addresses, minus gas. Swap events alone overstate it, because
@@ -785,7 +1021,8 @@ launchpad hooks take fees outside the event.</li></ul></div>
 are blanked, are joined. An address that repeatedly receives most of an operator's sell proceeds joins as its profit
 address. A contract that 5 or more other wallets use for their own trades is a public app, not a bot.</p></div>
 <div><h3>Out of scope</h3><ul>
-<li>Sandwiches with more than 2 blocks between the bot's buy and sell; launch sniping, arbitrage and back-running.</li>
+<li>Sandwiches where the bot sold more than {WINDOW} seconds after its buy; launch sniping, arbitrage and
+back-running.</li>
 <li>Profit moved to an address that the transactions don't link to the operator, or kept in tokens other than HYPE,
 WHYPE and USDC.</li></ul></div>
 </div></section>"""
@@ -796,6 +1033,7 @@ WHYPE and USDC.</li></ul></div>
         f'<a href="#{anchor}">{text}</a>'
         for anchor, text in (
             ("example", "Example"),
+            ("seen", "How bots saw"),
             ("when", "When"),
             ("who", "Who"),
             ("victims", "Victims"),
@@ -808,7 +1046,7 @@ WHYPE and USDC.</li></ul></div>
 <title>Sandwich attacks on Elysium</title><style>{css}</style></head><body><div class="layout">
 <nav class="side">{nav}</nav>
 <main>
-{header}{summary}{example}{when_section}{who_section}{victims_section}{where}{method}
+{header}{summary}{example}{seen}{when_section}{who_section}{victims_section}{where}{method}
 </main></div></body></html>"""
     os.makedirs("docs", exist_ok=True)
     with open("docs/index.html", "w") as f:
@@ -831,6 +1069,11 @@ def export_csv(d, name):
                 "time_utc",
                 "block",
                 "tier",
+                "seconds",
+                "buy_to_victim_blocks",
+                "victim_to_sell_blocks",
+                "victim_path",
+                "evidence",
                 "operator",
                 "operator_label",
                 "wallet",
@@ -854,6 +1097,11 @@ def export_csv(d, name):
                     when(s["t"], "%Y-%m-%d %H:%M:%S"),
                     s["front"]["b"],
                     s["tier"],
+                    s["seconds"],
+                    s["buy_to_victim_blocks"],
+                    s["victim_to_sell_blocks"],
+                    s["victims"][0].get("path", ""),
+                    s.get("evidence") or "",
                     s["operator"],
                     name.get(s["operator"], ""),
                     s["wallet"],
