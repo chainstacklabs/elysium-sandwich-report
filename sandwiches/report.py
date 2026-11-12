@@ -970,7 +970,8 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
 <div><h3>Finding sandwiches</h3><ol>
 <li>In one pool: a buy, then other wallets buying in the same direction, then a sell by the first buyer of about what
 it bought (within 5%), with the sell's block at most {WINDOW} seconds after the buy's block. We call this pattern a
-<i>match</i>. Each buy and each sell joins one match at most: a sell takes the bot's earliest buy that is still free.</li>
+<i>match</i>. Each buy and each sell joins one match at most: a sell takes the bot's earliest buy that is still
+free.</li>
 <li>The buy and the sell come from the same wallet, each victim from a different one.</li>
 <li>A buy, then others buying, then a sell is also what an ordinary trader does. What makes it a sandwich is that the
 bot knew the victim's transaction before it landed. {pct(100 * proven_n / len(d.all))} of matches carry their own proof
