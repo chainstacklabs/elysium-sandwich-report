@@ -13,7 +13,7 @@ from .chain import APPS, NATIVE, PUBLIC_LAUNCH, USDC, WHYPE, load, save
 from .charts import bars, stacked_area
 from .clock import Clock
 from .detect import WINDOW
-from .money import CHANCE, MAX_WALLETS, ODDS, PROVEN_PER_OPERATOR
+from .money import CHANCE, MAX_WALLETS, ODDS, PROVEN_PER_OPERATOR, WIN_MATCHES, WIN_RATE
 
 EXPLORER = "https://elysium.kinetiq.xyz/"
 EXAMPLES = [  # bot buys of the walkthroughs: one in the private mainnet, one after the public launch
@@ -970,7 +970,8 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
 <div><h3>Finding sandwiches</h3><ol>
 <li>In one pool: a buy, then other wallets buying in the same direction, then a sell by the first buyer of about what
 it bought (within 5%), with the sell's block at most {WINDOW} seconds after the buy's block. We call this pattern a
-<i>match</i>. Each buy and each sell joins one match at most.</li>
+<i>match</i>. Each buy and each sell joins one match at most: a sell takes the bot's earliest buy that is still
+free.</li>
 <li>The buy and the sell come from the same wallet, each victim from a different one.</li>
 <li>A buy, then others buying, then a sell is also what an ordinary trader does. What makes it a sandwich is that the
 bot knew the victim's transaction before it landed. {pct(100 * proven_n / len(d.all))} of matches carry their own proof
@@ -984,11 +985,17 @@ its sell no more than the victim.</li>
 <li><b>Inbox:</b> {pct(100 * by_proof["inbox"] / len(d.all))}. The victim's buy was waiting in the inbox on HyperEVM before the bot
 bought.</li></ul></li>
 <li>Proofs also fire by chance, on about {CHANCE:.1%} of ordinary buys, so one proven match proves nothing. A match
-counts when its operator is proven, which takes all four:<ul>
-<li>{PROVEN_PER_OPERATOR} or more proven matches;</li>
-<li>more proven matches than chance would give, with odds below 1 in {round(1 / ODDS):,};</li>
+counts when its operator is proven. An operator is proven in one of two ways:<ul>
+<li>by proofs: {PROVEN_PER_OPERATOR} or more proven matches, and more of them than chance would give, with odds below
+1 in {round(1 / ODDS):,};</li>
+<li>by results: a profit in {WIN_RATE:.0%} or more of at least {WIN_MATCHES} matches. A bot that pays no tip, or sends
+its own buy through the inbox, leaves almost no proofs but still wins nearly every time. This shows what the wallet
+does, not that it knew the victim's transaction; no ordinary trader with 30 or more matches comes close.</li></ul>
+Either way it also needs:<ul>
 <li>at most {MAX_WALLETS} wallets, since a larger group is app users rather than one bot;</li>
-<li>a profit over all its matches.</li></ul>
+<li>a profit over all its matches;</li>
+<li>a profit in more than half of its matches. A trader that buys and sells quickly in many pools also fits the
+pattern, but loses more often than it wins.</li></ul>
 Then all of its matches count; {pct(100 * pattern_n / len(rows))} of counted sandwiches have no proof
 of their own. The remaining proven matches, {pct(100 * len(chance) / len(d.all))} of all matches and spread over
 {n(len({s["operator"] for s in chance}))} operators, do not count.{check_text}

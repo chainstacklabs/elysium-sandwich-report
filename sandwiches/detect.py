@@ -2,8 +2,9 @@
 
 1. From swap logs: in one pool, a front swap, then one or more swaps in the same direction by other
    transactions, then a back swap in the opposite direction that sells within 5% of what the front bought,
-   all within 30 seconds of the front (block timestamps). Each front and back joins one sandwich at most.
-2. From transactions: the front and back come from the same wallet, each victim from a different one.
+   all within 30 seconds of the front (block timestamps).
+2. From transactions: the front and back come from the same wallet, each victim from a different one. Each swap
+   joins one sandwich at most: a back takes the earliest front that is still free.
 3. Tier A: one block, only victims between the legs. B: one block, other transactions between. C: the back
    lands in a later block.
 4. Each victim's path: sent to the sequencer, or through Elysium's inbox on HyperEVM (the block that executed it
@@ -66,13 +67,27 @@ def hype_side(swap, tokens):
     return swap["in"] if is_hype(t_in) else (swap["out"] if is_hype(t_out) else 0)
 
 
-def candidates(tokens, window=WINDOW, keep=True):
-    """Sandwich-shaped triples from swap logs, plus HYPE volume per day (net HYPE moved per transaction).
-    `between` lists every other transaction that swapped in the pool from the front to the last victim, in order:
-    the loss re-run replays them without the front."""
+def _closes(q, x):
+    """Indexes of the queued swaps that `x` could close as a back, oldest first: the opposite direction, another
+    transaction, `x` sells within 5% of what it bought, and a third transaction swapped in its direction in between."""
+    hits, later = [], set()
+    for i in range(len(q) - 1, -1, -1):
+        f = q[i]
+        if f["z"] == x["z"]:
+            continue
+        if f["tx"] != x["tx"]:
+            if abs(x["in"] - f["out"]) <= TOLERANCE * f["out"] and later - {f["tx"]}:
+                hits.append(i)
+            later.add(f["tx"])
+    return hits[::-1]
+
+
+def _pairs(tokens, window=WINDOW, keep=False):
+    """Walk every swap in chain order and yield (queue, back, indexes of its possible fronts in the queue). A swap
+    stays in the queue whatever it closed, so it can still be the front or the victim of another pair. With `keep`,
+    also save the HYPE volume per day (net HYPE moved per transaction)."""
     clock = Clock()
     recent = defaultdict(deque)
-    found = []
     volume = defaultdict(int)
     tx, net = None, 0
     for x in rows():
@@ -89,33 +104,46 @@ def candidates(tokens, window=WINDOW, keep=True):
         now = clock.time(x["b"])
         while q and now - clock.time(q[0]["b"]) > window + MARGIN:
             q.popleft()
-        matched = False
-        for i, front in enumerate(q):
-            if front["z"] == x["z"] or front["tx"] == x["tx"] or abs(x["in"] - front["out"]) > TOLERANCE * front["out"]:
-                continue
-            later = list(q)[i + 1 :]
-            victims = [v for v in later if v["z"] == front["z"] and v["tx"] not in (front["tx"], x["tx"])]
-            if victims:
-                last = victims[-1]
-                between = []
-                for v in later:
-                    if v["tx"] not in (front["tx"], x["tx"]) and v["tx"] not in between:
-                        between.append(v["tx"])
-                    if v is last:
-                        break
-                found.append(
-                    {"pool": x["pool"], "front": front, "victims": victims[:MAX_VICTIMS], "back": x, "between": between}
-                )
-                del q[i]  # a front joins one sandwich, and its back is not reused as a front
-                matched = True
-                break
-        if not matched:
-            q.append(x)
-            if len(q) > QUEUE:
-                q.popleft()
+        hits = _closes(q, x)
+        if hits:
+            yield q, x, hits
+        q.append(x)
+        if len(q) > QUEUE:
+            q.popleft()
     volume[clock.day(x["b"])] += abs(net)
     if keep:
         save("volume.json", {d: v / 1e18 for d, v in sorted(volume.items())})
+
+
+def legs(tokens, window=WINDOW):
+    """Transactions of every possible front and back. Their senders decide which pairs are worth building."""
+    return {h for q, x, hits in _pairs(tokens, window) for i in hits for h in (q[i]["tx"], x["tx"])}
+
+
+def candidates(tokens, txs, window=WINDOW, keep=True):
+    """Sandwich-shaped triples from swap logs whose front and back come from the same wallet. One swap can appear in
+    several; `classify` keeps one sandwich per swap. `between` lists every other transaction that swapped in the pool
+    from the front to the last victim, in order: the loss re-run replays them without the front."""
+    found = []
+    for q, x, hits in _pairs(tokens, window, keep):
+        k = txs.get(x["tx"])
+        for i in hits:
+            front = q[i]
+            f = txs.get(front["tx"])
+            if not f or not k or f["from"] != k["from"]:
+                continue
+            later = list(q)[i + 1 :]
+            victims = [v for v in later if v["z"] == front["z"] and v["tx"] not in (front["tx"], x["tx"])]
+            last = victims[-1]
+            between = []
+            for v in later:
+                if v["tx"] not in (front["tx"], x["tx"]) and v["tx"] not in between:
+                    between.append(v["tx"])
+                if v is last:
+                    break
+            found.append(
+                {"pool": x["pool"], "front": front, "victims": victims[:MAX_VICTIMS], "back": x, "between": between}
+            )
     return found
 
 
@@ -213,14 +241,16 @@ def effective_tip(t, base):
 
 def classify(cands, txs, tokens, keep=True):
     fees = base_fees([c["front"]["b"] for c in cands if c["front"]["b"] == c["back"]["b"]])
-    out = []
-    for c in cands:
+    out, used = [], set()
+    for c in cands:  # in chain order of the back, earliest front first
         f, k = txs.get(c["front"]["tx"]), txs.get(c["back"]["tx"])
         if not f or not k or f["from"] != k["from"]:
             continue
         victims = [v for v in c["victims"] if v["tx"] in txs and txs[v["tx"]]["from"] != f["from"]]
-        if not victims:
+        ends = {(c[e]["tx"], c[e]["li"]) for e in ("front", "back")}
+        if not victims or ends & used:
             continue
+        used |= ends
         same_block = c["front"]["b"] == c["back"]["b"]
         if same_block:
             tier = "A" if c["back"]["ti"] - c["front"]["ti"] - 1 == len({v["tx"] for v in victims}) else "B"
@@ -268,10 +298,10 @@ def classify(cands, txs, tokens, keep=True):
 
 def run():
     tokens = pool_tokens()
-    raw = candidates(tokens)
+    raw = candidates(tokens, lookup(legs(tokens)))
     cands = in_window(raw)
     print(f"candidates {len(raw):,}, within {WINDOW} s {len(cands):,}", flush=True)
-    txs = lookup(h for c in cands for h in [c["front"]["tx"], c["back"]["tx"]] + [v["tx"] for v in c["victims"]])
+    txs = lookup(v["tx"] for c in cands for v in c["victims"])
     found = classify(cands, txs, tokens)
     victim_paths(found)
     limits(found)
