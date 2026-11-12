@@ -114,9 +114,11 @@ def count(sandwiches):
     waited in the HyperEVM inbox before the bot bought (`inbox`), the bot's buy was ordered just ahead of the victim by
     tip in the same block (`order`), the victim got just above its minimum (`limit`). Proofs also fire by chance on
     about CHANCE of ordinary buys, so one proven match is not enough. An operator is proven by PROVEN_PER_OPERATOR or
-    more proven matches that chance would give with odds below ODDS, at most MAX_WALLETS wallets, and a profit over all
-    its matches; then all its matches count."""
+    more proven matches that chance would give with odds below ODDS, at most MAX_WALLETS wallets, a profit over all its
+    matches and a profit in more than half of them; then all its matches count. The last one separates a bot from a
+    trader that buys and sells quickly in many pools: its trades match the pattern but lose more often than they win."""
     matches, proven, wallets, kept = defaultdict(int), defaultdict(int), defaultdict(set), defaultdict(int)
+    won = defaultdict(int)
     for s in sandwiches:
         s["proofs"] = [
             p
@@ -132,6 +134,7 @@ def count(sandwiches):
         proven[op] += bool(s["proofs"])
         wallets[op].add(s["wallet"])
         kept[op] += s["profit"] or 0
+        won[op] += (s["profit"] or 0) > 0
     ops = {
         op
         for op in matches
@@ -139,6 +142,7 @@ def count(sandwiches):
         and by_chance(proven[op], matches[op]) < ODDS
         and len(wallets[op]) <= MAX_WALLETS
         and kept[op] > 0
+        and 2 * won[op] > matches[op]
     }
     for s in sandwiches:
         s["counted"] = s["operator"] in ops
