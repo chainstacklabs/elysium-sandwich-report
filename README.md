@@ -24,8 +24,8 @@ all before the public launch. This repository measures who did it and what the v
 ## What's here
 
 - [`docs/index.html`](docs/index.html) — the report: findings, operators, victims, targets and method
-- [`data/sandwiches.csv`](data/sandwiches.csv) — every sandwich, one row each, with transactions, operator, loss and
-  profit
+- [`data/sandwiches.csv`](data/sandwiches.csv) — every sandwich, one row each, with transactions, operator, loss,
+  profit and whether the victim's signed buy was also posted to the inbox on HyperEVM
 - [`sandwiches/`](sandwiches) — the Python package that builds both from chain data
 
 ## Run

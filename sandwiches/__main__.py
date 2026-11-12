@@ -5,7 +5,7 @@ Each step reads and writes ./cache, so a re-run only fetches what is new.
 
 import sys
 
-from . import clock, detect, inbox, money, operators, report, rules, scan, venues
+from . import clock, copies, detect, inbox, money, operators, report, rules, scan, venues
 from .chain import load, save
 
 
@@ -34,6 +34,7 @@ STEPS = {
     "detect": detect.run,  # pool tokens, candidates, transaction checks, tiers
     "prices": prices,  # daily HYPE/USD from Elysium's USDC pools
     "measure": measure,  # profit from traces, operators, victims' loss from simulation
+    "copies": copies.run,  # victims' transactions also posted to the inbox on HyperEVM
     "rules": rules.run,  # how the count changes with the sell window
     "venues": venues.run,  # swap events of other AMM formats
     "report": report.build,  # docs/index.html and data/sandwiches.csv

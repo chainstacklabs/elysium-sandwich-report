@@ -186,6 +186,9 @@ class Data:
         self.ops = load("operators.json")
         self.volume = load("volume.json")
         self.venues = load("venues.json", {})
+        result = load("copies.json", {}).get("result") or {}
+        self.copies, self.checked = result.get("copies", {}), set(result.get("checked", []))
+        self.copy_totals = result.get("totals", {})
         rows = load("sandwiches.json")
         self.all = rows
         self.rows = [s for s in rows if s["counted"]]
@@ -204,6 +207,14 @@ class Data:
             return short(pool.split(":")[-1])
         a, b = (self.symbols.get(x, short(x)) for x in t)
         return f"{b} / {a}" if a in ("HYPE", "WHYPE") else f"{a} / {b}"
+
+    def copy(self, s):
+        """The earliest inbox copy of the first victim's transaction: a dict, False when it has none, None when not
+        checked (inbox-route victims, or the copies step has not run)."""
+        h = s["victims"][0]["tx"]
+        if s["victims"][0].get("path") != "sequencer" or h not in self.checked:
+            return None
+        return self.copies.get(h, False)
 
     @staticmethod
     def venue(s):
@@ -516,7 +527,7 @@ instead (<a href="#inbox-example">example</a>).</p>
     limit_pct = pct(100 * sum(1 for s in seq if "limit" in s.get("proofs", [])) / len(seq)) if seq else "0%"
     seq_fig = figure(
         "Sent to the sequencer: bots knew the victim's exact transaction",
-        "These trades were never public before they were in a block, yet bots acted on them:",
+        "Bots acted on these trades before they were in a block, in ways that need the victim's own transaction:",
         f"""<ul class="facts">
 <li><b>Victim pushed to its minimum.</b> In {limit_pct} of these sandwiches the victim received just above the
 minimum output written in its own transaction, against about {CHANCE:.1%} of ordinary buys. The bot sized its buy to
@@ -530,13 +541,15 @@ planned the whole sandwich before the victim's trade was in a block.</li>
 victim's buy, so the bot acted before the victim's trade was in any block.</li>
 </ul>""",
     )
+    copies_fig = copies_figure(d, seq, hdr, lambda o: opref(o) if o in name else addr(o))
     seen = f"""
 <section id="seen"><h2>How did bots see the trades?</h2>
-<p class="dek">Elysium has no public mempool, yet bots saw victims' buys before they reached a block, in two
-ways.</p>
+<p class="dek">Elysium has no public mempool, yet bots saw victims' buys before they reached a block. A victim's buy
+reached Elysium in one of two ways: sent to the sequencer, or sent through the inbox on HyperEVM.</p>
 {route_fig}
 {inbox_fig}
 {seq_fig}
+{copies_fig}
 </section>"""
 
     # ---- when
@@ -963,6 +976,13 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
         if check
         else ""
     )
+    tot = d.copy_totals
+    copies_scanned = f"{n(tot.get('messages', 0))} messages" if tot else "not run"
+    copies_origin = (
+        f" {n(tot['origin'])} messages sent from origin keep their content outside the log and were not decoded."
+        if tot.get("origin")
+        else ""
+    )
     method = f"""
 <section id="method"><h2>How do we know?</h2>
 <div class="method">
@@ -981,8 +1001,8 @@ pools show this about {CHANCE:.1%} of the time. An output exactly equal to such 
 not count.</li>
 <li><b>Ordered by tip:</b> {pct(100 * by_proof["order"] / len(d.all))}. In one block, the bot's buy pays a higher tip than the victim and
 its sell no more than the victim.</li>
-<li><b>Inbox:</b> {pct(100 * by_proof["inbox"] / len(d.all))}. The victim's buy was waiting in the inbox on HyperEVM before the bot
-bought.</li></ul></li>
+<li><b>Inbox:</b> {pct(100 * by_proof["inbox"] / len(d.all))}. The victim sent its buy through the inbox on HyperEVM, and it was
+waiting there before the bot bought. A copy posted after the buy was already in a block is not a proof.</li></ul></li>
 <li>Proofs also fire by chance, on about {CHANCE:.1%} of ordinary buys, so one proven match proves nothing. A match
 counts when its operator is proven, which takes all four:<ul>
 <li>{PROVEN_PER_OPERATOR} or more proven matches;</li>
@@ -1000,10 +1020,16 @@ meant 0.2 to 2 seconds and missed bots that sold later.</p></div>
 find many more matches, mostly ordinary traders who bought and sold while others were buying; the proof keeps them out
 of the count.</p>
 {rules_table}</div>
-<div><h3>Detecting the inbox route</h3>
+<div><h3>Detecting the inbox route and inbox copies</h3>
 <p>A victim's buy came through the inbox on HyperEVM when the block that executed it read a new message from the
 inbox (the block header counts messages read). The message's time comes from its <code>MessageDelivered</code>
-log on Elysium's bridge contract on HyperEVM.</p></div>
+log on Elysium's bridge contract on HyperEVM.</p>
+<p>A buy sent to the sequencer has an inbox copy when the same signed transaction also appears in an inbox message.
+We read every <code>InboxMessageDelivered</code> log of the inbox on HyperEVM, from before the first sandwich to after
+the last: {copies_scanned}. A message with one signed transaction starts with byte <code>0x04</code>, and the keccak-256
+hash of the rest is the Elysium transaction hash. Batch messages (byte <code>0x03</code>) are opened too.{copies_origin}
+The poster is the message's sender on the bridge, minus the address offset Arbitrum adds to senders on the parent chain.
+The table compares the copy's HyperEVM time with the victim's block, both in whole seconds.</p></div>
 <div><h3>Losses and profits</h3><ul>
 <li><b>Victims lost:</b> every transaction that swapped in the pool from the bot's buy to the last victim is re-run
 in order, without the bot's buy, with <code>eth_simulateV1</code> on the state just before the buy's block. Each
@@ -1055,6 +1081,96 @@ WHYPE and USDC.</li></ul></div>
     print(f"report: {n(len(rows))} sandwiches, victims lost {usd(loss)}, bots kept {usd(profit)}")
 
 
+def copy_stats(d, rs, hdr):
+    """Inbox copies of the first victims' transactions in sequencer-route sandwiches rs."""
+    checked = [s for s in rs if d.copy(s) is not None]
+    hits = [(s, d.copy(s)) for s in checked if d.copy(s)]
+    k = len(hits) or 1
+    lost = sum(s["loss_usd"] for s in checked)
+    return {
+        "checked": len(checked),
+        "hits": len(hits),
+        "share": 100 * len(hits) / len(checked) if checked else 0,
+        "loss": 100 * sum(s["loss_usd"] for s, _ in hits) / lost if lost else 0,
+        "other": 100 * sum(1 for _, c in hits if not c["self"]) / k,
+        "near": 100 * sum(1 for _, c in hits if -2 <= c["seconds"] <= 1) / k,
+        "median": statistics.median(c["seconds"] for _, c in hits) if hits else None,
+        # the block that executed the buy had not yet read the copy: header nonce = messages read so far
+        "unread": sum(1 for s, c in hits if c["index"] >= hdr[str(s["victims"][0]["b"])][1]),
+    }
+
+
+def copies_figure(d, seq, hdr, op_ref):
+    """Victims' buys sent to the sequencer whose signed transaction was also posted to the inbox on HyperEVM."""
+    if not d.checked:
+        return ""
+    late = [s for s in seq if s["t"] >= PUBLIC_LAUNCH]
+    before = copy_stats(d, [s for s in seq if s["t"] < PUBLIC_LAUNCH], hdr)
+    after = copy_stats(d, late, hdr)
+    every = copy_stats(d, seq, hdr)
+    rows = [
+        [
+            label,
+            n(x["checked"]),
+            pct(x["share"]),
+            bar(x["share"], 100, "var(--inbox)"),
+            pct(x["loss"]),
+            pct(x["other"]) if x["hits"] else "",
+            f"{x['median']:+g}" if x["hits"] else "",
+        ]
+        for label, x in (("Private mainnet", before), ("After the public launch", after))
+        if x["checked"]
+    ]
+    table_html = table(
+        [
+            ("Victim's buy sent to the sequencer", "l"),
+            ("Sandwiches", "r"),
+            ("Also in the inbox", "r"),
+            ("", "bar"),
+            ("Share of losses", "r"),
+            ("Posted by another wallet", "r"),
+            ("Median seconds after the block", "r"),
+        ],
+        rows,
+    )
+    # after the launch one operator runs most sandwiches; say how much it moves the share
+    top = Counter(s["operator"] for s in late if d.copy(s) is not None).most_common(1)
+    top_text = ""
+    if top and late:
+        o = top[0][0]
+        mine = copy_stats(d, [s for s in late if s["operator"] == o], hdr)
+        rest = copy_stats(d, [s for s in late if s["operator"] != o], hdr)
+        if mine["checked"] > after["checked"] / 2 and rest["checked"]:
+            top_text = (
+                f" After the launch, {op_ref(o)} ran {pct(100 * mine['checked'] / after['checked'])} of these "
+                f"sandwiches, and only {pct(mine['share'])} of its victims' buys had a copy. Without it, the share "
+                f"after the launch is {pct(rest['share'])}."
+            )
+    unread = "Every time" if every["unread"] == every["hits"] else f"In {pct(100 * every['unread'] / every['hits'])}"
+    return (
+        '<div id="copies">'
+        + figure(
+            "Who else held the victim's signed buy?",
+            f"In {pct(every['share'])} of sandwiches with a victim's buy sent to the sequencer, the same signed "
+            "transaction also appears in a message in the inbox on HyperEVM, byte for byte. A wallet other than the "
+            f"victim posted {pct(every['other'])} of these copies.{top_text}",
+            table_html
+            + f"""<ul class="facts">
+<li><b>What it shows.</b> Someone other than the victim held the victim's signed transaction and posted a copy to the
+inbox, where anyone can read it. That is a relay wallet: an app or a trading bot that sends trades for its users.</li>
+<li><b>Copy and buy arrive together.</b> {pct(every["near"])} of copies carry a HyperEVM time from 2 seconds before to
+1 second after the Elysium block that executed the buy. {unread}, that block had not yet read the
+copy: the sequencer executed the buy it received directly and read the copy later.</li>
+<li><b>What it does not show.</b> That the bot found the trade through the copy. Block times are whole seconds, so
+they can't order the copy and the block within a second. In a live test on Nov 11, copies reached HyperEVM a median of
+2 seconds after the Elysium block that held the buy, too late for a bot whose buy sits in that block or an earlier
+one.</li>
+</ul>""",
+        )
+        + "</div>"
+    )
+
+
 def cell(text):
     """A CSV cell for on-chain text such as token symbols: never read as a formula by spreadsheet apps."""
     return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
@@ -1089,6 +1205,9 @@ def export_csv(d, name):
                 "victim_loss_usd",
                 "bot_profit_hype",
                 "bot_profit_usd",
+                "victim_inbox_copy",
+                "copy_poster",
+                "copy_seconds",
             ]
         )
         for s in sorted(d.rows, key=lambda s: (s["front"]["b"], s["front"]["li"])):
@@ -1117,5 +1236,8 @@ def export_csv(d, name):
                     f"{s['loss_usd']:.2f}" if s["loss"] is not None else "",
                     "" if s["profit"] is None else f"{s['profit'] / 1e18:.6f}",
                     f"{s['profit_usd']:.2f}",
+                    "" if (c := d.copy(s)) is None else ("yes" if c else "no"),
+                    c["poster"] if c else "",
+                    c["seconds"] if c else "",
                 ]
             )
