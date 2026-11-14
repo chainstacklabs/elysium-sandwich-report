@@ -13,7 +13,18 @@ from .chain import APPS, NATIVE, PUBLIC_LAUNCH, USDC, WHYPE, load, save
 from .charts import bars, stacked_area
 from .clock import Clock
 from .detect import WINDOW
-from .money import CHANCE, MAX_WALLETS, ODDS, PROVEN_PER_OPERATOR, WIN_MATCHES, WIN_RATE
+from .money import (
+    CHANCE,
+    FAST_BLOCKS,
+    FAST_MATCHES,
+    FAST_RATE,
+    MAX_WALLETS,
+    ODDS,
+    PROVEN_PER_OPERATOR,
+    WIN_MATCHES,
+    WIN_RATE,
+    fast,
+)
 
 EXPLORER = "https://elysium.kinetiq.xyz/"
 EXAMPLES = [  # bot buys of the walkthroughs: one in the private mainnet, one after the public launch
@@ -932,6 +943,12 @@ to trade. {botless_text}<i>Largest sandwich</i> links the bot's buy, the victim'
     proven_n = sum(1 for s in d.all if s.get("proofs"))
     chance = [s for s in d.all if s.get("proofs") and not s["counted"]]
     pattern_n = sum(1 for s in rows if not s.get("proofs"))
+    fast_by_op = defaultdict(lambda: [0, 0])  # uncounted operators: [matches, fast matches]
+    for s in d.all:
+        if not s["counted"]:
+            fast_by_op[s["operator"]][0] += 1
+            fast_by_op[s["operator"]][1] += fast(s)
+    fast_others = max((f / m for m, f in fast_by_op.values() if m >= FAST_MATCHES), default=0)
     rules_table = table(
         [
             ("Rule", "l"),
@@ -985,13 +1002,17 @@ its sell no more than the victim.</li>
 <li><b>Inbox:</b> {pct(100 * by_proof["inbox"] / len(d.all))}. The victim's buy was waiting in the inbox on HyperEVM before the bot
 bought.</li></ul></li>
 <li>Proofs also fire by chance, on about {CHANCE:.1%} of ordinary buys, so one proven match proves nothing. A match
-counts when its operator is proven. An operator is proven in one of two ways:<ul>
+counts when its operator is proven. An operator is proven in one of three ways:<ul>
 <li>by proofs: {PROVEN_PER_OPERATOR} or more proven matches, and more of them than chance would give, with odds below
 1 in {round(1 / ODDS):,};</li>
 <li>by results: a profit in {WIN_RATE:.0%} or more of at least {WIN_MATCHES} matches. A bot that pays no tip, or sends
 its own buy through the inbox, leaves almost no proofs but still wins nearly every time. This shows what the wallet
-does, not that it knew the victim's transaction; no ordinary trader with 30 or more matches comes close.</li></ul>
-Either way it also needs:<ul>
+does, not that it knew the victim's transaction; no ordinary trader with 30 or more matches comes close.</li>
+<li>by speed: in {FAST_RATE:.0%} or more of at least {FAST_MATCHES} matches, the buy goes through a contract that is
+not a public router, at most {FAST_BLOCKS} blocks before the victim, and makes a profit. A small bot that pays no tip
+leaves no proofs but usually does this. Among the operators that do not count and have {FAST_MATCHES} or more matches,
+the highest share is {pct(100 * fast_others)}.</li></ul>
+In each case it also needs:<ul>
 <li>at most {MAX_WALLETS} wallets, since a larger group is app users rather than one bot;</li>
 <li>a profit over all its matches;</li>
 <li>a profit in more than half of its matches. A trader that buys and sells quickly in many pools also fits the

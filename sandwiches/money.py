@@ -96,6 +96,15 @@ ODDS = 1e-5  # an operator's proven count must be this unlikely by chance (about
 MAX_WALLETS = 20  # more wallets than this is a crowd of app users, not one bot
 WIN_RATE = 0.9  # an operator that profits this often needs no proofs:
 WIN_MATCHES = 100  # over at least this many matches; other wallets with 30+ matches profit in 81% of them at most
+FAST_BLOCKS = 3  # a fast match: the buy goes through a contract that is not a public router, at most this many
+FAST_RATE = 0.75  # blocks before the victim, and makes a profit; an operator needs this share of fast matches, over
+FAST_MATCHES = 15  # at least this many matches (bots that buy a block or two ahead: 78-97%; others: 44% at most)
+
+
+def fast(s):
+    """The buy went through a contract that is not a public router, at most FAST_BLOCKS blocks before the victim,
+    and profited."""
+    return bool(s["bot"]) and s["buy_to_victim_blocks"] <= FAST_BLOCKS and (s["profit"] or 0) > 0
 
 
 def by_chance(k, n, q=CHANCE):
@@ -116,13 +125,14 @@ def count(sandwiches):
     waited in the HyperEVM inbox before the bot bought (`inbox`), the bot's buy was ordered just ahead of the victim by
     tip in the same block (`order`), the victim got just above its minimum (`limit`). Proofs also fire by chance on
     about CHANCE of ordinary buys, so one proven match is not enough. An operator is proven by PROVEN_PER_OPERATOR or
-    more proven matches that chance would give with odds below ODDS, or by a profit in WIN_RATE of at least WIN_MATCHES
-    matches: a bot that leaves no proofs (it pays no tip, or sends its own buy through the inbox) still wins almost
-    every time, and a trader does not. Either way it also needs at most MAX_WALLETS wallets, a profit over all its
-    matches and a profit in more than half of them, which separates a bot from a trader that buys and sells quickly in
-    many pools; then all its matches count."""
+    more proven matches that chance would give with odds below ODDS, by a profit in WIN_RATE of at least WIN_MATCHES
+    matches, or by FAST_RATE fast matches out of at least FAST_MATCHES: a bot that leaves no proofs (it pays no tip, or
+    sends its own buy through the inbox) still wins almost every time, usually buying just ahead of the victim through a
+    contract that is not a public router, and a trader does not. In each case it also needs at most MAX_WALLETS
+    wallets, a profit over all its matches and a profit in more than half of them, which separates a bot from a trader
+    that buys and sells quickly in many pools; then all its matches count."""
     matches, proven, wallets, kept = defaultdict(int), defaultdict(int), defaultdict(set), defaultdict(int)
-    won = defaultdict(int)
+    won, quick = defaultdict(int), defaultdict(int)
     for s in sandwiches:
         s["proofs"] = [
             p
@@ -139,12 +149,14 @@ def count(sandwiches):
         wallets[op].add(s["wallet"])
         kept[op] += s["profit"] or 0
         won[op] += (s["profit"] or 0) > 0
+        quick[op] += fast(s)
     ops = {
         op
         for op in matches
         if (
             (proven[op] >= PROVEN_PER_OPERATOR and by_chance(proven[op], matches[op]) < ODDS)
             or (matches[op] >= WIN_MATCHES and won[op] >= WIN_RATE * matches[op])
+            or (matches[op] >= FAST_MATCHES and quick[op] >= FAST_RATE * matches[op])
         )
         and len(wallets[op]) <= MAX_WALLETS
         and kept[op] > 0
